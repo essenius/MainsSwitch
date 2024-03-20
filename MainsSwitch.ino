@@ -1,3 +1,14 @@
+// Copyright 2024 Rik Essenius
+// 
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file
+// except in compliance with the License. You may obtain a copy of the License at
+// 
+//     http://www.apache.org/licenses/LICENSE-2.0
+// 
+// Unless required by applicable law or agreed to in writing, software distributed under the License
+// is distributed on an "AS IS" BASIS WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and limitations under the License.
+
 #include <EEPROM.h>
 #include <ArduinoJson.h>
 #include <ESP8266WiFi.h>
@@ -7,7 +18,7 @@
 #include <time.h>
 #include <fs.h>
 
-constexpr int RelayPort = 2;
+constexpr int RelayPort = 0; // GPIO0
 constexpr const char* trueString = "true";
 constexpr const char* falseString = "false";
 
@@ -30,45 +41,6 @@ bool equals(byte* payload, unsigned int length, const char* expectation) {
   return true;
 }
 
-void fetchURL(BearSSL::WiFiClientSecure *client, const char *host, const uint16_t port, const char *path) {
-  if (!path) {
-    path = "/";
-  }
-
-  ESP.resetFreeContStack();
-  uint32_t freeStackStart = ESP.getFreeContStack();
-  Serial.printf("Trying: %s:%d...", host, port);
-  client->connect(host, port);
-  if (!client->connected()) {
-    Serial.printf("*** Can't connect. ***\n-------\n");
-    return;
-  }
-  Serial.printf("Connected!\n-------\n");
-  client->write("GET ");
-  client->write(path);
-  client->write(" HTTP/1.0\r\nHost: ");
-  client->write(host);
-  client->write("\r\nUser-Agent: ESP8266\r\n");
-  client->write("\r\n");
-  uint32_t to = millis() + 5000;
-  if (client->connected()) {
-    do {
-      char tmp[32];
-      memset(tmp, 0, 32);
-      int rlen = client->read((uint8_t*)tmp, sizeof(tmp) - 1);
-      yield();
-      if (rlen < 0) {
-        break;
-      }
-      Serial.print(tmp);
-    } while (millis() < to);
-  }
-  client->stop();
-  uint32_t freeStackEnd = ESP.getFreeContStack();
-  Serial.printf("\nCONT stack used: %d\n", freeStackStart - freeStackEnd);
-  Serial.printf("BSSL stack used: %d\n-------\n\n", stack_thunk_get_max_usage());
-}
-
 bool getConfig() {
   constexpr int MaxConfigSize = 512;
   char config[MaxConfigSize];
@@ -85,7 +57,7 @@ bool getConfig() {
   int address = 0;
   while (!isFinished && address < MaxConfigSize) {
     byte value = EEPROM.read(address);
-    config[address] = value ^ chipId[address % MaxKeySize];
+    config[address] = static_cast<char>(value ^ chipId[address % MaxKeySize]);
     isFinished = config[address] == 0;
     address++;
   }
@@ -107,7 +79,23 @@ void printWifiStatus() {
   Serial.printf("channel: %d\n", WiFi.channel());
   Serial.printf("mac address: %s\n", WiFi.macAddress().c_str());
   Serial.printf("bssid: %s\n", WiFi.BSSIDstr().c_str());
-  Serial.printf("autoconnect: %d\n", WiFi.getAutoConnect());
+  Serial.printf("autoConnect: %d\n", WiFi.getAutoConnect());
+}
+
+String readFromFile(const char* fileName) {
+    String result = "";
+    File file = SPIFFS.open(fileName, "r");
+    if (!file) {
+        Serial.printf("Could not find '%s'\n", fileName);
+    } else {
+        if (file.available()) {
+            result = file.readString();
+        } else {
+            Serial.printf("Could not read from '%s'\n", fileName);
+        }
+        file.close();
+    }    
+    return result;
 }
 
 void readCertificates(BearSSL::WiFiClientSecure& client) {
@@ -134,24 +122,7 @@ void readCertificates(BearSSL::WiFiClientSecure& client) {
     Serial.println("Could not set Client key");
     return;
   }
-
   client.setClientRSACert(&clientCert, &clientKey); 
-}
-
-String readFromFile(const char* fileName) {
-    String result = "";
-    File file = SPIFFS.open(fileName, "r");
-    if (!file) {
-        Serial.printf("Could not find '%s'\n", fileName);
-    } else {
-        if (file.available()) {
-            result = file.readString();
-        } else {
-            Serial.printf("Could not read from '%s'\n", fileName);
-        }
-        file.close();
-    }    
-    return result;
 }
 
 bool setClock() {
@@ -163,7 +134,7 @@ bool setClock() {
 
   // wait until we're no longer in the first few hours of 1970
   time_t now = time(nullptr);
-  while (now < 8 * 3600 * 2) {
+  while (now < static_cast<time_t>(3600) * 16) {
     delay(500);
     now = time(nullptr);
   }
@@ -189,23 +160,6 @@ void startSPIFFS() {
     fsInfo.totalBytes, fsInfo.usedBytes, fsInfo.blockSize, fsInfo.pageSize, fsInfo.maxOpenFiles, fsInfo.maxPathLength);
 }
 
-
-bool mqttPublish(const char* topic, const char* value) {
-  char buffer[100];
-  if (hostName == nullptr) {
-    Serial.println("hostName not set");
-    return false;
-  }
-  SafeCString::sprintf(buffer, "homie/%s/%s", hostName, topic);
-  Serial.printf("Publishing '%s' to '%s' ", value, topic);
-  if (!mqttClient.publish(buffer, value)) {
-    Serial.println("failed");
-    return false;
-  }
-  Serial.println("succeeded");
-  return true;
-}
-
 bool mqttAnnounce() {
   if (!mqttPublish("$homie", "4.0.0")) {
     Serial.println("Could not publish message");
@@ -224,6 +178,17 @@ bool mqttAnnounce() {
     mqttPublish("switch/1/$settable","true"); 
   }
   return true;
+}
+
+void mqttCallback(const char* topic, byte* payload, unsigned int length) {
+  if (equals(payload, length, trueString) && (digitalRead(RelayPort) == HIGH)) {
+    relaySwitched = true;
+    digitalWrite(RelayPort, LOW);
+  }
+  if (equals(payload, length, falseString) && (digitalRead(RelayPort) == LOW)) {
+    relaySwitched = true;
+    digitalWrite(RelayPort, HIGH);
+  }
 }
 
 bool mqttConnect() {
@@ -256,20 +221,24 @@ bool mqttConnect() {
   return true;
 }
 
-bool mqttPublish(const char* topic, bool value) {
-  return mqttPublish(topic, value ? trueString : falseString);
+bool mqttPublish(const char* topic, const char* value) {
+  char buffer[100];
+  if (hostName == nullptr) {
+    Serial.println("hostName not set");
+    return false;
+  }
+  SafeCString::sprintf(buffer, "homie/%s/%s", hostName, topic);
+  Serial.printf("Publishing '%s' to '%s' ", value, topic);
+  if (!mqttClient.publish(buffer, value)) {
+    Serial.println("failed");
+    return false;
+  }
+  Serial.println("succeeded");
+  return true;
 }
 
-void mqttCallback(const char* topic, byte* payload, unsigned int length) {
-  
-  if (equals(payload, length, trueString) && !digitalRead(RelayPort)) {
-    relaySwitched = true;
-    digitalWrite(RelayPort, HIGH);
-  }
-  if (equals(payload, length, falseString) && digitalRead(RelayPort)) {
-    relaySwitched = true;
-    digitalWrite(RelayPort, LOW);
-  }
+bool mqttPublish(const char* topic, bool value) {
+  return mqttPublish(topic, value ? trueString : falseString);
 }
 
 bool wifiConnect() {
@@ -294,9 +263,16 @@ bool wifiConnect() {
 }
 
 void setup() {
+  // port value high means the relay is off
+  pinMode(RelayPort, OUTPUT);
+  digitalWrite(RelayPort, HIGH);
+  
+  // the LED shows we are initializing
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, LOW);
+
   Serial.begin(115200);
   delay(250);
-  pinMode(RelayPort, OUTPUT);
 
   WiFi.mode(WIFI_STA);
   WiFi.setAutoConnect(false);
@@ -307,20 +283,23 @@ void setup() {
   wifiConnect();
   printWifiStatus();
   setClock();
-
-  char path[] = "/rest/items/KNX_SL_Slaapkamer";
-  fetchURL(&wifiClient, "nas", 8443, path);
   mqttReady = mqttConnect() && mqttAnnounce();
 }
 
 void loop() {
   if (mqttReady) {
+    // show the world we're done initializing by switching off the LED
+    if (digitalRead(LED_BUILTIN) == LOW) {
+      digitalWrite(LED_BUILTIN, HIGH);
+    }
     if (relaySwitched) {
-      if (mqttPublish("switch/1", digitalRead(RelayPort))) {
+      if (mqttPublish("switch/1", !digitalRead(RelayPort))) {
         relaySwitched = false;
       }
     } 
     if (!mqttClient.loop()) {
+      // we got disconnected. Show that via the LED
+      digitalWrite(LED_BUILTIN, LOW);
       Serial.println("Reconnecting to MQTT");
       mqttReady = mqttConnect();      
     }
