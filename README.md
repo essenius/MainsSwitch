@@ -1,4 +1,5 @@
 This sketch is intended for an ESP8266-01S in combination with a Relay v4.
+
 ![ESP01S Relay v4](doc/esp01-relay.jpg)
 
 It connects to an MQTT broker via TLS, using a private root CA certificate, a client certificate/key pair (which should accept the name used in the host entry below) and a user ID/password.
