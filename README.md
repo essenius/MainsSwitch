@@ -34,4 +34,4 @@ The EEPROM content is pseudo-encrypted so you can't immediately see the plain te
 
 For MQTT we use the [homie](https://homieiot.github.io/) convention with device name the host entry in the configuration, node name `switch` and property `1` (since there is just one relay).
 
-Send `true` to `homie/my-client-name/switch/1/set` to switch on the relay, and 'false' to switch it off.
+Send `true` to `homie/my-client-name/switch/1/set` to switch on the relay, and 'false' to switch it off. The sketch will confirm the relay state in `homie/my-client-name/switch/1`
